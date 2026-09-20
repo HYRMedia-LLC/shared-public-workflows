@@ -1,0 +1,146 @@
+name: Handle new issue
+
+on:
+  workflow_call:
+    inputs:
+      assignees:
+        description: Comma-separated GitHub usernames to assign to the issue.
+        required: false
+        type: string
+        default: ""
+      discord_username:
+        description: Display name for the Discord webhook message.
+        required: false
+        type: string
+        default: GitHub Issues
+      discord_avatar_url:
+        description: Avatar URL for the Discord webhook message.
+        required: false
+        type: string
+        default: ""
+      discord_mention:
+        description: Optional Discord user or role mention, such as <@&ROLE_ID>.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      discord_webhook_url:
+        description: Discord webhook URL that receives new issue notifications.
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  handle-new-issue:
+    name: Assign and notify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate event
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [[ -z "$ISSUE_NUMBER" ]]; then
+            echo "This workflow must be called from an issues event." >&2
+            exit 1
+          fi
+
+      - name: Assign issue
+        env:
+          ASSIGNEES: ${{ inputs.assignees }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          payload="$(
+            jq -n --arg value "$ASSIGNEES" '
+              $value
+              | split(",")
+              | map(gsub("^\\s+|\\s+$"; ""))
+              | map(select(length > 0))
+              | unique
+              | {assignees: .}
+            '
+          )"
+
+          if [[ "$(jq '.assignees | length' <<< "$payload")" -eq 0 ]]; then
+            echo "No issue assignees are configured."
+            exit 0
+          fi
+
+          gh api \
+            --method POST \
+            "repos/$GH_REPO/issues/$ISSUE_NUMBER/assignees" \
+            --input - <<< "$payload"
+
+      - name: Notify Discord
+        if: ${{ always() && github.event.issue.number != null }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.discord_webhook_url }}
+          DISCORD_USERNAME: ${{ inputs.discord_username }}
+          DISCORD_AVATAR_URL: ${{ inputs.discord_avatar_url }}
+          DISCORD_MENTION: ${{ inputs.discord_mention }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "No Discord webhook is configured."
+            exit 0
+          fi
+
+          payload="$(
+            jq -n \
+              --arg username "$DISCORD_USERNAME" \
+              --arg avatar_url "$DISCORD_AVATAR_URL" \
+              --arg content "$DISCORD_MENTION" \
+              --arg issue_title "$ISSUE_TITLE" \
+              --arg issue_body "$ISSUE_BODY" \
+              --arg issue_url "$ISSUE_URL" \
+              --arg issue_number "$ISSUE_NUMBER" \
+              --arg issue_author "$ISSUE_AUTHOR" \
+              --arg repository "$REPOSITORY" \
+              --arg repository_url "$REPOSITORY_URL" \
+              '{
+                username: $username,
+                content: $content,
+                allowed_mentions: {parse: ["users", "roles"]},
+                embeds: [{
+                  title: ($issue_title | if length > 256 then .[0:253] + "..." else . end),
+                  url: $issue_url,
+                  description: (
+                    if ($issue_body | length) == 0 then
+                      "_No description provided._"
+                    elif ($issue_body | length) > 1000 then
+                      $issue_body[0:997] + "..."
+                    else
+                      $issue_body
+                    end
+                  ),
+                  color: 3447003,
+                  fields: [
+                    {name: "Repository", value: ("[" + $repository + "](" + $repository_url + ")"), inline: true},
+                    {name: "Opened by", value: ("[@" + $issue_author + "](https://github.com/" + $issue_author + ")"), inline: true},
+                    {name: "Issue", value: ("[#" + $issue_number + "](" + $issue_url + ")"), inline: true}
+                  ],
+                  timestamp: (now | todateiso8601)
+                }]
+              }
+              | if ($avatar_url | length) == 0 then del(.avatar_url) else .avatar_url = $avatar_url end
+              '
+          )"
+
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --retry 3 \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            "$DISCORD_WEBHOOK_URL"

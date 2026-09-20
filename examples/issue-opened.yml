@@ -1,0 +1,20 @@
+# Copy this file to .github/workflows/issue-opened.yml in each issue-tracking repository.
+name: Handle new issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  handle-new-issue:
+    uses: HYRMedia-LLC/shared-public-workflows/.github/workflows/issue-opened.yml@main
+    with:
+      assignees: ${{ vars.ISSUE_ASSIGNEES }}
+      discord_username: Issue Tracker
+      discord_mention: ${{ vars.DISCORD_ISSUE_MENTION }}
+    secrets:
+      discord_webhook_url: ${{ secrets.DISCORD_ISSUES_WEBHOOK }}
