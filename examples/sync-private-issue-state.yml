@@ -1,0 +1,18 @@
+# Use this caller in each private destination repository.
+name: Sync issue state to public tracker
+
+on:
+  issues:
+    types: [closed, reopened]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  sync-public-issue-state:
+    uses: HYRMedia-LLC/shared-public-workflows/.github/workflows/sync-private-issue-state-to-public.yml@main
+    with:
+      public_repository: HYRMedia-LLC/PUBLIC_ISSUE_REPOSITORY
+    secrets:
+      issue_sync_token: ${{ secrets.ISSUE_SYNC_TOKEN }}

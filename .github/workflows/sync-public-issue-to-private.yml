@@ -1,0 +1,141 @@
+name: Sync public issue to private repository
+
+on:
+  workflow_call:
+    inputs:
+      target_repository:
+        description: Private destination repository in owner/name format.
+        required: true
+        type: string
+      route_label:
+        description: Label required before a new private mirror is created.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      issue_sync_token:
+        description: Token with Issues read and write access to the source and destination repositories.
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: issue-sync-${{ github.repository }}-${{ github.event.issue.number }}-${{ inputs.target_repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync-public-issue:
+    name: Mirror public issue
+    if: ${{ github.event_name == 'issues' && github.event.issue.number != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create or update private mirror
+        env:
+          GH_TOKEN: ${{ secrets.issue_sync_token }}
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          ROUTE_LABEL: ${{ inputs.route_label }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          SOURCE_ISSUE_TITLE: ${{ github.event.issue.title }}
+          SOURCE_ISSUE_BODY: ${{ github.event.issue.body }}
+          SOURCE_ISSUE_URL: ${{ github.event.issue.html_url }}
+          SOURCE_ISSUE_STATE: ${{ github.event.issue.state }}
+          SOURCE_ISSUE_LABELS: ${{ toJSON(github.event.issue.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          marker="<!-- issue-sync-source: $SOURCE_REPOSITORY#$SOURCE_ISSUE_NUMBER -->"
+          notes_marker='<!-- issue-sync-internal-notes -->'
+
+          destination_number="$(
+            gh api \
+              --paginate \
+              --method GET \
+              "repos/$TARGET_REPOSITORY/issues" \
+              -f state=all \
+              -f per_page=100 \
+            | jq -rs --arg marker "$marker" '
+                add
+                | map(
+                    select(
+                      (.pull_request | not)
+                      and ((.body // "") | startswith($marker))
+                    )
+                  )
+                | .[0].number // empty
+              '
+          )"
+
+          if [[ -z "$destination_number" && -n "$ROUTE_LABEL" ]]; then
+            if ! jq -e --arg route "$ROUTE_LABEL" 'index($route) != null' \
+              <<< "$SOURCE_ISSUE_LABELS" >/dev/null; then
+              echo "Waiting for the '$ROUTE_LABEL' routing label."
+              exit 0
+            fi
+          fi
+
+          if [[ -z "$destination_number" && "$SOURCE_ISSUE_STATE" == "closed" ]]; then
+            echo "The public issue closed before a private mirror was created."
+            exit 0
+          fi
+
+          sanitized_source_body="${SOURCE_ISSUE_BODY//$notes_marker/}"
+          internal_notes=$'\n\n## Internal notes\n'
+
+          if [[ -n "$destination_number" ]]; then
+            existing_body="$(
+              gh api \
+                --method GET \
+                "repos/$TARGET_REPOSITORY/issues/$destination_number" \
+                --jq '.body // ""'
+            )"
+
+            if [[ "$existing_body" == *"$notes_marker"* ]]; then
+              internal_notes="${existing_body#*"$notes_marker"}"
+            fi
+          fi
+
+          destination_body="$(
+            jq -rn \
+              --arg marker "$marker" \
+              --arg source_url "$SOURCE_ISSUE_URL" \
+              --arg source_repository "$SOURCE_REPOSITORY" \
+              --arg source_number "$SOURCE_ISSUE_NUMBER" \
+              --arg source_body "$sanitized_source_body" \
+              --arg notes_marker "$notes_marker" \
+              --arg internal_notes "$internal_notes" \
+              '$marker + "\n\n" +
+               "> Synced from [" + $source_repository + "#" + $source_number + "](" + $source_url + ")." +
+               "\n\n---\n\n" + $source_body + "\n\n---\n\n" +
+               $notes_marker + $internal_notes'
+          )"
+
+          if [[ -z "$destination_number" ]]; then
+            destination_number="$(
+              gh api \
+                --method POST \
+                "repos/$TARGET_REPOSITORY/issues" \
+                --raw-field title="$SOURCE_ISSUE_TITLE" \
+                --raw-field body="$destination_body" \
+                --jq '.number'
+            )"
+            echo "Created $TARGET_REPOSITORY#$destination_number."
+          else
+            gh api \
+              --method PATCH \
+              "repos/$TARGET_REPOSITORY/issues/$destination_number" \
+              --raw-field title="$SOURCE_ISSUE_TITLE" \
+              --raw-field body="$destination_body" \
+              --raw-field state="$SOURCE_ISSUE_STATE" \
+              >/dev/null
+            echo "Updated $TARGET_REPOSITORY#$destination_number."
+          fi
+
+          {
+            echo "### Private issue sync"
+            echo
+            echo "Synced to \`$TARGET_REPOSITORY#$destination_number\`."
+          } >> "$GITHUB_STEP_SUMMARY"
