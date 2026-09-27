@@ -24,7 +24,7 @@ jobs:
   sync-private-issue-state:
     name: Update public issue state
     if: ${{ github.event_name == 'issues' && github.event.issue.number != null }}
-    runs-on: avrea-ubuntu-latest-2-vcpu
+    runs-on: [self-hosted, linux, home-server]
     timeout-minutes: 5
     steps:
       - name: Update public issue state
