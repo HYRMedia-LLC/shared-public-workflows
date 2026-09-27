@@ -35,7 +35,7 @@ permissions:
 jobs:
   handle-new-issue:
     name: Assign and notify
-    runs-on: avrea-ubuntu-latest-2-vcpu
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Validate event

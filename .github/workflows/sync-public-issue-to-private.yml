@@ -29,7 +29,7 @@ jobs:
   sync-public-issue:
     name: Mirror public issue
     if: ${{ github.event_name == 'issues' && github.event.issue.number != null }}
-    runs-on: avrea-ubuntu-latest-2-vcpu
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Create or update private mirror
